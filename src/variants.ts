@@ -13,41 +13,164 @@ export type BodySnapshot = {
 
 export type VariantsByName = Record<string, BodySnapshot>;
 
-// One store entry per request. ctx.store is already plugin-scoped; the
-// prefix only leaves room for future non-variant keys.
-const storeKey = (requestId: string) => `variants.${requestId}`;
+/**
+ * Variants are persisted inside the request's `description`, in a fenced
+ * block tagged `yaak-body-swap`. The description is part of the request
+ * model, so it travels with directory sync (the request's YAML file), Git,
+ * and workspace export: variants are versioned and survive a machine change.
+ *
+ * `body` is not an option: the app rebuilds it from scratch when the body
+ * type changes or a form editor saves, which would silently drop extra keys.
+ */
+export const BLOCK_TAG = "yaak-body-swap";
+const FORMAT_VERSION = 1;
 
-export async function listVariants(ctx: Context, requestId: string): Promise<VariantsByName> {
-  return (await ctx.store.get<VariantsByName>(storeKey(requestId))) ?? {};
+// Opening fence (3+ backticks) + tag, content, then the same fence on its own line.
+const BLOCK_RE = new RegExp(
+  "(^|\\n)[ \\t]*(`{3,})" + BLOCK_TAG + "[ \\t]*\\r?\\n([\\s\\S]*?)\\r?\\n[ \\t]*\\2[ \\t]*(?=\\r?\\n|$)",
+);
+
+export class CorruptVariantsError extends Error {
+  constructor(reason: string) {
+    super(
+      `The ${BLOCK_TAG} block in this request's description is not valid (${reason}). ` +
+        "Fix or remove it in the Description tab; nothing was changed.",
+    );
+    this.name = "CorruptVariantsError";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Extracts the variants stored in a description. Throws CorruptVariantsError on a broken block. */
+export function parseVariants(description: string | null | undefined): VariantsByName {
+  const match = BLOCK_RE.exec(description ?? "");
+  if (match == null) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[3] ?? "");
+  } catch (err) {
+    throw new CorruptVariantsError(err instanceof Error ? err.message : "invalid JSON");
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.variants)) {
+    throw new CorruptVariantsError('missing "variants" object');
+  }
+
+  const variants: VariantsByName = {};
+  for (const [name, snapshot] of Object.entries(parsed.variants)) {
+    if (!isRecord(snapshot) || !isRecord(snapshot.body)) {
+      throw new CorruptVariantsError(`variant "${name}" has no body object`);
+    }
+    const bodyType = snapshot.bodyType;
+    if (bodyType !== null && bodyType !== undefined && typeof bodyType !== "string") {
+      throw new CorruptVariantsError(`variant "${name}" has an invalid bodyType`);
+    }
+    variants[name] = { body: snapshot.body, bodyType: bodyType ?? null };
+  }
+  return variants;
+}
+
+// Sorted keys at every level: saving the same content twice yields the same
+// text, so Git diffs only show real changes.
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, sortKeys(value[key])]),
+    );
+  }
+  return value;
+}
+
+function renderBlock(variants: VariantsByName): string {
+  const json = JSON.stringify(sortKeys({ version: FORMAT_VERSION, variants }), null, 2);
+  // The fence must be longer than any backtick run inside the content.
+  const longestRun = Math.max(0, ...(json.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${fence}${BLOCK_TAG}\n${json}\n${fence}`;
+}
+
+/** Returns the description with the variants block replaced, appended, or (when empty) removed. */
+export function writeVariants(description: string | null | undefined, variants: VariantsByName): string {
+  const current = description ?? "";
+  const hasVariants = Object.keys(variants).length > 0;
+  const match = BLOCK_RE.exec(current);
+
+  if (match == null) {
+    if (!hasVariants) return current;
+    const prefix = current.trimEnd();
+    return `${prefix}${prefix ? "\n\n" : ""}${renderBlock(variants)}\n`;
+  }
+
+  const before = current.slice(0, match.index).trimEnd();
+  const after = current.slice(match.index + match[0].length).trim();
+  const parts = [before, hasVariants ? renderBlock(variants) : "", after].filter(Boolean);
+  return parts.length === 0 ? "" : `${parts.join("\n\n")}\n`;
+}
+
+// ---------------------------------------------------------------------------
+// Request-level operations
+// ---------------------------------------------------------------------------
+
+// Versions <= 1.0.0 kept variants in the plugin store (local database only).
+const legacyStoreKey = (requestId: string) => `variants.${requestId}`;
+
+export type LoadedVariants = { request: HttpRequest; variants: VariantsByName };
+
+/**
+ * Loads the freshest copy of the request and its variants. Variants left in
+ * the legacy plugin store are moved into the description on first touch
+ * (description wins on a name clash), so old data is not lost.
+ *
+ * Always continue with the returned `request`: it may carry a description
+ * newer than the one the action was invoked with.
+ */
+export async function loadVariants(ctx: Context, httpRequest: HttpRequest): Promise<LoadedVariants> {
+  const request = (await ctx.httpRequest.getById({ id: httpRequest.id })) ?? httpRequest;
+  const variants = parseVariants(request.description);
+
+  const legacy = await ctx.store.get<VariantsByName>(legacyStoreKey(request.id));
+  if (legacy == null || Object.keys(legacy).length === 0) return { request, variants };
+
+  const merged: VariantsByName = { ...legacy, ...variants };
+  const migrated = await persist(ctx, request, merged);
+  await ctx.store.delete(legacyStoreKey(request.id));
+  return { request: migrated, variants: merged };
+}
+
+async function persist(ctx: Context, request: HttpRequest, variants: VariantsByName): Promise<HttpRequest> {
+  // Spread the whole model: update() args are deserialized with serde
+  // defaults and every column is overwritten, so a bare partial would blank
+  // the request's url, name, and workspace binding.
+  const next = { ...request, description: writeVariants(request.description, variants) };
+  return (await ctx.httpRequest.update(next)) ?? next;
 }
 
 export async function saveVariant(
   ctx: Context,
-  requestId: string,
+  httpRequest: HttpRequest,
   name: string,
   snapshot: BodySnapshot,
-): Promise<{ replaced: boolean }> {
-  const variants = await listVariants(ctx, requestId);
+): Promise<{ replaced: boolean; request: HttpRequest }> {
+  const { request, variants } = await loadVariants(ctx, httpRequest);
   const replaced = name in variants;
   variants[name] = snapshot;
-  await ctx.store.set(storeKey(requestId), variants);
-  return { replaced };
+  return { replaced, request: await persist(ctx, request, variants) };
 }
 
 export async function deleteVariant(
   ctx: Context,
-  requestId: string,
+  httpRequest: HttpRequest,
   name: string,
 ): Promise<boolean> {
-  const variants = await listVariants(ctx, requestId);
+  const { request, variants } = await loadVariants(ctx, httpRequest);
   if (!(name in variants)) return false;
   delete variants[name];
-  // Drop the row entirely with the last variant, so deleted or abandoned
-  // requests leave nothing behind in the plugin store.
-  if (Object.keys(variants).length === 0) {
-    await ctx.store.delete(storeKey(requestId));
-  } else {
-    await ctx.store.set(storeKey(requestId), variants);
-  }
+  await persist(ctx, request, variants);
   return true;
 }

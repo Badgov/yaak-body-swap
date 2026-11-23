@@ -1,9 +1,30 @@
-import type { Context } from "@yaakapp/api";
+import type { Context, HttpRequest } from "@yaakapp/api";
 import { describe, expect, test } from "vitest";
-import { deleteVariant, listVariants, saveVariant } from "./variants";
+import {
+  BLOCK_TAG,
+  CorruptVariantsError,
+  deleteVariant,
+  loadVariants,
+  parseVariants,
+  saveVariant,
+  writeVariants,
+} from "./variants";
 
-function fakeStoreCtx() {
+function fakeCtx(initial: Partial<HttpRequest> = {}, legacy?: unknown) {
   const stored = new Map<string, unknown>();
+  if (legacy !== undefined) stored.set("variants.req_1", legacy);
+  const requests = new Map<string, HttpRequest>();
+  const base = {
+    id: "req_1",
+    workspaceId: "wk_1",
+    name: "Create user",
+    url: "https://api.example.com/users",
+    description: "",
+    body: { text: "{}" },
+    bodyType: "application/json",
+    ...initial,
+  } as HttpRequest;
+  requests.set(base.id, base);
   const ctx = {
     store: {
       async get(key: string) {
@@ -16,58 +37,139 @@ function fakeStoreCtx() {
         return stored.delete(key);
       },
     },
+    httpRequest: {
+      async getById({ id }: { id: string }) {
+        return requests.get(id) ?? null;
+      },
+      async update(args: HttpRequest) {
+        requests.set(args.id, args);
+        return args;
+      },
+    },
   } as unknown as Context;
-  return { ctx, stored };
+  return { ctx, stored, current: () => requests.get("req_1") as HttpRequest, base };
 }
 
-describe("variant store", () => {
-  test("lists no variants for an unknown request", async () => {
-    const { ctx } = fakeStoreCtx();
-    expect(await listVariants(ctx, "req_1")).toEqual({});
+const a = { body: { text: "a" }, bodyType: "text/plain" };
+const b = { body: { text: "b" }, bodyType: "text/plain" };
+
+describe("description block format", () => {
+  test("no block means no variants", () => {
+    expect(parseVariants("")).toEqual({});
+    expect(parseVariants("Just some docs")).toEqual({});
+    expect(parseVariants(undefined)).toEqual({});
   });
 
-  test("round-trips a snapshot under its name", async () => {
-    const { ctx } = fakeStoreCtx();
-    const snapshot = { body: { text: '{"a":1}' }, bodyType: "application/json" };
-    const { replaced } = await saveVariant(ctx, "req_1", "minimal", snapshot);
+  test("round-trips through the description, keeping user text", () => {
+    const desc = writeVariants("Creates a user.", { minimal: a });
+    expect(desc.startsWith("Creates a user.\n\n```" + BLOCK_TAG + "\n")).toBe(true);
+    expect(parseVariants(desc)).toEqual({ minimal: a });
+  });
+
+  test("is deterministic: sorted names and keys for clean diffs", () => {
+    const one = writeVariants("", { zeta: b, alpha: { bodyType: "x", body: { z: 1, a: 2 } } });
+    const two = writeVariants("", { alpha: { body: { a: 2, z: 1 }, bodyType: "x" }, zeta: b });
+    expect(one).toBe(two);
+    expect(one.indexOf('"alpha"')).toBeLessThan(one.indexOf('"zeta"'));
+  });
+
+  test("replaces the block in place and keeps text before and after it", () => {
+    const first = writeVariants("Intro", { minimal: a });
+    const withOutro = `${first}\nOutro notes`;
+    const updated = writeVariants(withOutro, { full: b });
+    expect(updated.startsWith("Intro\n\n```")).toBe(true);
+    expect(updated.trimEnd().endsWith("Outro notes")).toBe(true);
+    expect(parseVariants(updated)).toEqual({ full: b });
+    expect(updated.match(new RegExp(BLOCK_TAG, "g"))?.length).toBe(1);
+  });
+
+  test("removes the block when the last variant goes away", () => {
+    const desc = writeVariants("Intro", { minimal: a });
+    expect(writeVariants(desc, {})).toBe("Intro\n");
+    expect(writeVariants(writeVariants("", { minimal: a }), {})).toBe("");
+  });
+
+  test("survives bodies that contain backtick fences", () => {
+    const tricky = { body: { text: "```js\ncode\n````" }, bodyType: "text/plain" };
+    const desc = writeVariants("", { tricky });
+    expect(desc.startsWith("`````" + BLOCK_TAG)).toBe(true);
+    expect(parseVariants(desc)).toEqual({ tricky });
+  });
+
+  test("accepts CRLF line endings from a Windows checkout", () => {
+    const desc = writeVariants("Intro", { minimal: a }).replace(/\n/g, "\r\n");
+    expect(parseVariants(desc)).toEqual({ minimal: a });
+  });
+
+  test("rejects a broken block instead of reading it as empty", () => {
+    expect(() => parseVariants("```" + BLOCK_TAG + "\n{ not json\n```")).toThrow(
+      CorruptVariantsError,
+    );
+    expect(() => parseVariants("```" + BLOCK_TAG + '\n{"variants":{"x":1}}\n```')).toThrow(
+      CorruptVariantsError,
+    );
+  });
+});
+
+describe("request-level operations", () => {
+  test("saves into the request description, not the local store", async () => {
+    const { ctx, stored, current } = fakeCtx({ description: "Docs" });
+    const { replaced } = await saveVariant(ctx, current(), "minimal", a);
     expect(replaced).toBe(false);
-    expect(await listVariants(ctx, "req_1")).toEqual({ minimal: snapshot });
+    expect(stored.size).toBe(0);
+    expect(current().description.startsWith("Docs\n\n")).toBe(true);
+    expect(parseVariants(current().description)).toEqual({ minimal: a });
+  });
+
+  test("keeps every other request field intact", async () => {
+    const { ctx, current, base } = fakeCtx();
+    await saveVariant(ctx, base, "minimal", a);
+    expect({ ...current(), description: "" }).toEqual({ ...base, description: "" });
   });
 
   test("reports a replace when saving under an existing name", async () => {
-    const { ctx } = fakeStoreCtx();
-    await saveVariant(ctx, "req_1", "minimal", { body: { text: "a" }, bodyType: "text/plain" });
-    const { replaced } = await saveVariant(ctx, "req_1", "minimal", {
-      body: { text: "b" },
-      bodyType: "text/plain",
-    });
+    const { ctx, current } = fakeCtx();
+    await saveVariant(ctx, current(), "minimal", a);
+    const { replaced } = await saveVariant(ctx, current(), "minimal", b);
     expect(replaced).toBe(true);
-    expect((await listVariants(ctx, "req_1")).minimal?.body).toEqual({ text: "b" });
+    expect(parseVariants(current().description)).toEqual({ minimal: b });
   });
 
-  test("keeps requests isolated from each other", async () => {
-    const { ctx } = fakeStoreCtx();
-    await saveVariant(ctx, "req_1", "minimal", { body: { text: "a" }, bodyType: "text/plain" });
-    expect(await listVariants(ctx, "req_2")).toEqual({});
+  test("reads the freshest request, not the possibly stale argument", async () => {
+    const { ctx, current, base } = fakeCtx();
+    await saveVariant(ctx, base, "one", a);
+    // `base` still has an empty description; the second save must not lose "one".
+    await saveVariant(ctx, base, "two", b);
+    expect(Object.keys(parseVariants(current().description)).sort()).toEqual(["one", "two"]);
   });
 
   test("deletes one variant and keeps the rest", async () => {
-    const { ctx } = fakeStoreCtx();
-    await saveVariant(ctx, "req_1", "minimal", { body: { text: "a" }, bodyType: "text/plain" });
-    await saveVariant(ctx, "req_1", "full", { body: { text: "b" }, bodyType: "text/plain" });
-    expect(await deleteVariant(ctx, "req_1", "minimal")).toBe(true);
-    expect(Object.keys(await listVariants(ctx, "req_1"))).toEqual(["full"]);
-  });
-
-  test("drops the store row when the last variant is deleted", async () => {
-    const { ctx, stored } = fakeStoreCtx();
-    await saveVariant(ctx, "req_1", "minimal", { body: { text: "a" }, bodyType: "text/plain" });
-    await deleteVariant(ctx, "req_1", "minimal");
-    expect(stored.size).toBe(0);
+    const { ctx, current } = fakeCtx();
+    await saveVariant(ctx, current(), "minimal", a);
+    await saveVariant(ctx, current(), "full", b);
+    expect(await deleteVariant(ctx, current(), "minimal")).toBe(true);
+    expect(Object.keys(parseVariants(current().description))).toEqual(["full"]);
   });
 
   test("reports false for a name that was never saved", async () => {
-    const { ctx } = fakeStoreCtx();
-    expect(await deleteVariant(ctx, "req_1", "minimal")).toBe(false);
+    const { ctx, current } = fakeCtx();
+    expect(await deleteVariant(ctx, current(), "minimal")).toBe(false);
+  });
+
+  test("migrates legacy store variants into the description", async () => {
+    const existing = writeVariants("", { minimal: b });
+    const { ctx, stored, current } = fakeCtx({ description: existing }, { minimal: a, old: a });
+    const { variants } = await loadVariants(ctx, current());
+    // The description wins a name clash; store-only names are carried over.
+    expect(variants).toEqual({ minimal: b, old: a });
+    expect(parseVariants(current().description)).toEqual({ minimal: b, old: a });
+    expect(stored.size).toBe(0);
+  });
+
+  test("never writes over a corrupt block", async () => {
+    const broken = "```" + BLOCK_TAG + "\n{ oops\n```";
+    const { ctx, current } = fakeCtx({ description: broken });
+    await expect(saveVariant(ctx, current(), "minimal", a)).rejects.toThrow(CorruptVariantsError);
+    expect(current().description).toBe(broken);
   });
 });

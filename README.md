@@ -51,10 +51,7 @@ request is active:
 
 ## Install
 
-From the plugin registry: search for **Body Swap** in
-Settings → Plugins.
-
-From source:
+This fork is not in the plugin registry. Install from source:
 
 ```sh
 npx --yes @yaakapp/cli plugin build
@@ -62,17 +59,55 @@ npx --yes @yaakapp/cli plugin build
 
 then Settings → Plugins → Add Plugin → choose this directory.
 
-## Good to know
+## Where variants live (fork change)
 
-Variants live in Yaak's plugin store (your local database), keyed by
-request id:
+> Fork of [sadick254/yaak-body-swap](https://github.com/sadick254/yaak-body-swap).
+> The original keeps variants in Yaak's local plugin store, so they never
+> leave the machine. This fork stores them **inside the request itself**.
 
-- They stay on this machine: workspace export, import, and directory sync
-  don't carry them.
-- Re-importing a spec (OpenAPI etc.) creates requests with fresh ids, so
-  regenerated requests start without variants.
-- Deleting a request in Yaak leaves its variants behind in the store; the
-  plugin API has no deletion event to clean up on.
+Variants are written to the request's **Description** as a fenced block:
+
+````markdown
+Your own notes stay here, untouched.
+
+```yaak-body-swap
+{
+  "variants": {
+    "minimal": {
+      "body": { "text": "{\"email\":\"a@b.c\"}" },
+      "bodyType": "application/json"
+    }
+  },
+  "version": 1
+}
+```
+````
+
+Because the description is part of the request model:
+
+- **Directory sync / Git:** variants land in the request's
+  `yaak.<requestId>.yaml`, so they are versioned, diffable, and available on
+  any machine that pulls the repo.
+- **Export / import:** they travel with workspace exports.
+- **Deleting a request deletes its variants.** Nothing is left behind.
+- **Deterministic output:** names and keys are sorted, so re-saving the same
+  content produces no diff.
+
+Notes:
+
+- The block is visible in the request's Description tab. Write your own docs
+  above or below it; the plugin only rewrites the block. It is removed when
+  the last variant is deleted.
+- If the block is hand-edited into invalid JSON, every action refuses to
+  write and shows an error instead of overwriting it.
+- **Migration:** variants saved by v1.x in the local plugin store are moved
+  into the description automatically the first time you use any action on
+  that request (on a name clash, the description wins).
+- Bodies are stored as-is (unrendered `${[ ... ]}` tags included). Do not
+  save variants containing secrets if the workspace is pushed to a shared
+  repo; use environment variables for those.
+- Re-importing a spec (OpenAPI etc.) still creates requests with fresh ids
+  and empty descriptions.
 - Switching replaces the request's current body by design. If the current
   body matters, save it as a variant first. The switch dialog reminds you.
 

@@ -1,14 +1,30 @@
-import type { PluginDefinition } from "@yaakapp/api";
+import type { Context, HttpRequest, PluginDefinition } from "@yaakapp/api";
 import { pickVariant } from "./picker";
-import { deleteVariant, listVariants, saveVariant } from "./variants";
+import { CorruptVariantsError, deleteVariant, loadVariants, saveVariant } from "./variants";
+
+type Handler = (ctx: Context, args: { httpRequest: HttpRequest }) => Promise<void>;
+
+// A hand-edited, broken variants block must never be overwritten: report it
+// and leave the request untouched so the user can repair it.
+function guarded(handler: Handler): Handler {
+  return async (ctx, args) => {
+    try {
+      await handler(ctx, args);
+    } catch (err) {
+      if (!(err instanceof CorruptVariantsError)) throw err;
+      await ctx.toast.show({ color: "danger", icon: "alert_triangle", message: err.message });
+    }
+  };
+}
 
 export const plugin: PluginDefinition = {
   httpRequestActions: [
     {
       label: "Save Body as Variant",
       icon: "pin",
-      async onSelect(ctx, { httpRequest }) {
-        const existing = Object.keys(await listVariants(ctx, httpRequest.id));
+      onSelect: guarded(async (ctx, { httpRequest }) => {
+        const { request, variants } = await loadVariants(ctx, httpRequest);
+        const existing = Object.keys(variants);
         const rawName = await ctx.prompt.text({
           id: "body-variants.save",
           title: "Save Body as Variant",
@@ -23,21 +39,21 @@ export const plugin: PluginDefinition = {
         const name = rawName?.trim();
         if (!name) return;
 
-        const { replaced } = await saveVariant(ctx, httpRequest.id, name, {
-          body: httpRequest.body,
-          bodyType: httpRequest.bodyType,
+        const { replaced } = await saveVariant(ctx, request, name, {
+          body: request.body,
+          bodyType: request.bodyType,
         });
         await ctx.toast.show({
           color: "success",
           icon: "check",
           message: `${replaced ? "Updated" : "Saved"} body variant "${name}"`,
         });
-      },
+      }),
     },
     {
       label: "Switch Body Variant",
       icon: "chevron_down",
-      async onSelect(ctx, { httpRequest }) {
+      onSelect: guarded(async (ctx, { httpRequest }) => {
         const picked = await pickVariant(ctx, httpRequest, {
           id: "body-variants.switch",
           title: "Switch Body Variant",
@@ -46,11 +62,10 @@ export const plugin: PluginDefinition = {
         });
         if (picked == null) return;
 
-        // Spread the whole model: update() args are deserialized with serde
-        // defaults and every column is overwritten, so a bare partial would
-        // blank the request's url, name, and workspace binding.
+        // Spread the whole (fresh) model: update() overwrites every column,
+        // and the description holds the variants themselves.
         await ctx.httpRequest.update({
-          ...httpRequest,
+          ...picked.request,
           body: picked.snapshot.body,
           bodyType: picked.snapshot.bodyType,
         });
@@ -59,12 +74,12 @@ export const plugin: PluginDefinition = {
           icon: "check",
           message: `Switched body to variant "${picked.name}"`,
         });
-      },
+      }),
     },
     {
       label: "Send Body Variant",
       icon: "copy",
-      async onSelect(ctx, { httpRequest }) {
+      onSelect: guarded(async (ctx, { httpRequest }) => {
         const picked = await pickVariant(ctx, httpRequest, {
           id: "body-variants.send",
           title: "Send Body Variant",
@@ -75,7 +90,7 @@ export const plugin: PluginDefinition = {
         // Switch first so the editor always shows the body the response in
         // the history pane was produced by, then send that same model.
         const switched = {
-          ...httpRequest,
+          ...picked.request,
           body: picked.snapshot.body,
           bodyType: picked.snapshot.bodyType,
         };
@@ -94,12 +109,12 @@ export const plugin: PluginDefinition = {
           icon: response.status < 400 ? "check" : "alert_triangle",
           message: `Sent body variant "${picked.name}" (HTTP ${response.status})`,
         });
-      },
+      }),
     },
     {
       label: "Delete Body Variant",
       icon: "trash",
-      async onSelect(ctx, { httpRequest }) {
+      onSelect: guarded(async (ctx, { httpRequest }) => {
         const picked = await pickVariant(ctx, httpRequest, {
           id: "body-variants.delete",
           title: "Delete Body Variant",
@@ -109,13 +124,13 @@ export const plugin: PluginDefinition = {
         });
         if (picked == null) return;
 
-        await deleteVariant(ctx, httpRequest.id, picked.name);
+        await deleteVariant(ctx, picked.request, picked.name);
         await ctx.toast.show({
           color: "success",
           icon: "trash",
           message: `Deleted body variant "${picked.name}"`,
         });
-      },
+      }),
     },
   ],
 };

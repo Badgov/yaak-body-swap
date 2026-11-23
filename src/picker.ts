@@ -1,5 +1,5 @@
 import type { Context, HttpRequest } from "@yaakapp/api";
-import { type BodySnapshot, listVariants } from "./variants";
+import { type BodySnapshot, loadVariants } from "./variants";
 
 // Order-insensitive JSON rendering so body objects compare by content,
 // not by the key order a serialization round-trip happens to produce.
@@ -22,6 +22,7 @@ function sameBody(a: BodySnapshot, b: BodySnapshot): boolean {
 /**
  * Ask the user to pick one of the request's saved variants. Returns null when
  * nothing is saved (after telling the user so) or the dialog is cancelled.
+ * The returned `request` is the freshest model: build any update on it.
  *
  * Preselects the variant whose snapshot equals the request's current body:
  * the "active" one is inferred from content rather than tracked as state, so
@@ -31,8 +32,8 @@ export async function pickVariant(
   ctx: Context,
   httpRequest: HttpRequest,
   dialog: { id: string; title: string; description: string; confirmText?: string },
-): Promise<{ name: string; snapshot: BodySnapshot } | null> {
-  const variants = await listVariants(ctx, httpRequest.id);
+): Promise<{ name: string; snapshot: BodySnapshot; request: HttpRequest } | null> {
+  const { request, variants } = await loadVariants(ctx, httpRequest);
   const names = Object.keys(variants).sort((a, b) => a.localeCompare(b));
   if (names.length === 0) {
     await ctx.toast.show({
@@ -43,7 +44,7 @@ export async function pickVariant(
     return null;
   }
 
-  const current: BodySnapshot = { body: httpRequest.body, bodyType: httpRequest.bodyType };
+  const current: BodySnapshot = { body: request.body, bodyType: request.bodyType };
   const active = names.find((name) => {
     const snapshot = variants[name];
     return snapshot != null && sameBody(snapshot, current);
@@ -68,5 +69,5 @@ export async function pickVariant(
   const name = typeof values.variant === "string" ? values.variant : preselected;
   const snapshot = name == null ? undefined : variants[name];
   if (name == null || snapshot === undefined) return null;
-  return { name, snapshot };
+  return { name, snapshot, request };
 }

@@ -1,19 +1,20 @@
 {
-  "name": "@sadick254/body-swap",
-  "displayName": "Body Swap",
-  "description": "Keep several named body variants on one request: switch between them, send one, or delete it",
-  "version": "1.0.0",
-  "author": "Isaac Odhiambo",
+  "name": "@badgov/body-swap-synced",
+  "displayName": "Body Swap (Synced)",
+  "description": "Named body variants per request, stored in the request itself so they travel with directory sync, Git, and export",
+  "version": "2.0.0",
+  "author": "Isaac Odhiambo (original), Badgov (fork)",
   "license": "MIT",
   "keywords": [
     "yaak-plugin",
     "body",
     "variants",
-    "http-request-action"
+    "http-request-action",
+    "directory-sync"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/sadick254/yaak-body-swap"
+    "url": "https://github.com/Badgov/yaak-body-swap"
   },
   "scripts": {
     "build": "yaak plugin build",
