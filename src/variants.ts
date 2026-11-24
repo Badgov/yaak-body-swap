@@ -117,30 +117,21 @@ export function writeVariants(description: string | null | undefined, variants: 
 // Request-level operations
 // ---------------------------------------------------------------------------
 
-// Versions <= 1.0.0 kept variants in the plugin store (local database only).
-const legacyStoreKey = (requestId: string) => `variants.${requestId}`;
-
 export type LoadedVariants = { request: HttpRequest; variants: VariantsByName };
 
 /**
- * Loads the freshest copy of the request and its variants. Variants left in
- * the legacy plugin store are moved into the description on first touch
- * (description wins on a name clash), so old data is not lost.
+ * Loads the freshest copy of the request and its variants.
  *
  * Always continue with the returned `request`: it may carry a description
  * newer than the one the action was invoked with.
+ *
+ * There is no automatic migration from the original plugin: ctx.store is
+ * scoped by plugin package name, so this fork cannot read the variants
+ * `@sadick254/body-swap` kept there. See the README for the manual steps.
  */
 export async function loadVariants(ctx: Context, httpRequest: HttpRequest): Promise<LoadedVariants> {
   const request = (await ctx.httpRequest.getById({ id: httpRequest.id })) ?? httpRequest;
-  const variants = parseVariants(request.description);
-
-  const legacy = await ctx.store.get<VariantsByName>(legacyStoreKey(request.id));
-  if (legacy == null || Object.keys(legacy).length === 0) return { request, variants };
-
-  const merged: VariantsByName = { ...legacy, ...variants };
-  const migrated = await persist(ctx, request, merged);
-  await ctx.store.delete(legacyStoreKey(request.id));
-  return { request: migrated, variants: merged };
+  return { request, variants: parseVariants(request.description) };
 }
 
 async function persist(ctx: Context, request: HttpRequest, variants: VariantsByName): Promise<HttpRequest> {

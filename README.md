@@ -100,9 +100,12 @@ Notes:
   the last variant is deleted.
 - If the block is hand-edited into invalid JSON, every action refuses to
   write and shows an error instead of overwriting it.
-- **Migration:** variants saved by v1.x in the local plugin store are moved
-  into the description automatically the first time you use any action on
-  that request (on a name clash, the description wins).
+- **Migrating from the original plugin is manual.** Yaak scopes each
+  plugin's store by package name, so this fork cannot read what
+  `@sadick254/body-swap` saved. With both plugins enabled, for each variant:
+  *Switch Body Variant* (original) → *Save Body as Variant* (this fork, same
+  name). Save the current body first if it matters, then uninstall the
+  original plugin.
 - Bodies are stored as-is (unrendered `${[ ... ]}` tags included). Do not
   save variants containing secrets if the workspace is pushed to a shared
   repo; use environment variables for those.

@@ -10,9 +10,8 @@ import {
   writeVariants,
 } from "./variants";
 
-function fakeCtx(initial: Partial<HttpRequest> = {}, legacy?: unknown) {
+function fakeCtx(initial: Partial<HttpRequest> = {}) {
   const stored = new Map<string, unknown>();
-  if (legacy !== undefined) stored.set("variants.req_1", legacy);
   const requests = new Map<string, HttpRequest>();
   const base = {
     id: "req_1",
@@ -156,14 +155,12 @@ describe("request-level operations", () => {
     expect(await deleteVariant(ctx, current(), "minimal")).toBe(false);
   });
 
-  test("migrates legacy store variants into the description", async () => {
-    const existing = writeVariants("", { minimal: b });
-    const { ctx, stored, current } = fakeCtx({ description: existing }, { minimal: a, old: a });
-    const { variants } = await loadVariants(ctx, current());
-    // The description wins a name clash; store-only names are carried over.
-    expect(variants).toEqual({ minimal: b, old: a });
-    expect(parseVariants(current().description)).toEqual({ minimal: b, old: a });
+  test("loads variants from the freshest description, read-only", async () => {
+    const { ctx, stored, current, base } = fakeCtx({ description: writeVariants("", { minimal: b }) });
+    const { variants } = await loadVariants(ctx, { ...base, description: "" });
+    expect(variants).toEqual({ minimal: b });
     expect(stored.size).toBe(0);
+    expect(parseVariants(current().description)).toEqual({ minimal: b });
   });
 
   test("never writes over a corrupt block", async () => {
