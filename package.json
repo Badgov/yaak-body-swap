@@ -2,7 +2,7 @@
   "name": "@badgov/body-swap-synced",
   "displayName": "Body Swap (Synced)",
   "description": "Named body variants per request, stored in the request itself so they travel with directory sync, Git, and export",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": "Isaac Odhiambo (original), Badgov (fork)",
   "license": "MIT",
   "keywords": [

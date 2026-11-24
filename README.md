@@ -65,23 +65,22 @@ then Settings → Plugins → Add Plugin → choose this directory.
 > The original keeps variants in Yaak's local plugin store, so they never
 > leave the machine. This fork stores them **inside the request itself**.
 
-Variants are written to the request's **Description** as a fenced block:
+Variants are written to the request's **Description** as a fenced block,
+one line per variant, so it stays short in the Description tab:
 
 ````markdown
 Your own notes stay here, untouched.
 
 ```yaak-body-swap
-{
-  "variants": {
-    "minimal": {
-      "body": { "text": "{\"email\":\"a@b.c\"}" },
-      "bodyType": "application/json"
-    }
-  },
-  "version": 1
-}
+{"version":2}
+{"name":"minimal","bodyType":"application/json","body":{"text":"{\"email\":\"a@b.c\"}"}}
+{"name":"missing-email","bodyType":"application/json","body":{"text":"{}"}}
 ```
 ````
+
+Blocks written by v2.0.0 (one pretty-printed `{"version":1,...}` object) are
+still read, and are rewritten in the line format on the next save or delete
+in that request.
 
 Because the description is part of the request model:
 
@@ -90,7 +89,8 @@ Because the description is part of the request model:
   any machine that pulls the repo.
 - **Export / import:** they travel with workspace exports.
 - **Deleting a request deletes its variants.** Nothing is left behind.
-- **Deterministic output:** names and keys are sorted, so re-saving the same
+- **One line per variant:** lines and keys are sorted, so a Git diff names
+  exactly the variant that changed, and re-saving the same
   content produces no diff.
 
 Notes:

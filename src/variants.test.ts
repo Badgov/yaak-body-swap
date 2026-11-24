@@ -110,6 +110,71 @@ describe("description block format", () => {
   });
 });
 
+describe("v2 line format", () => {
+  const block = (content: string) => "```" + BLOCK_TAG + "\n" + content + "\n```";
+
+  test("writes a header plus exactly one line per variant", () => {
+    const multiline = { body: { text: '{\n  "a": 1\n}' }, bodyType: "application/json" };
+    const desc = writeVariants("", { zeta: b, alpha: multiline });
+    expect(desc).toBe(
+      block(
+        [
+          '{"version":2}',
+          '{"name":"alpha","bodyType":"application/json","body":{"text":"{\\n  \\"a\\": 1\\n}"}}',
+          '{"name":"zeta","bodyType":"text/plain","body":{"text":"b"}}',
+        ].join("\n"),
+      ) + "\n",
+    );
+    expect(parseVariants(desc)).toEqual({ alpha: multiline, zeta: b });
+  });
+
+  test("changing one variant changes exactly one line", () => {
+    const before = writeVariants("", { one: a, two: a, three: a }).split("\n");
+    const after = writeVariants("", { one: a, two: b, three: a }).split("\n");
+    const changed = before.filter((line, i) => line !== after[i]);
+    expect(changed).toHaveLength(1);
+    expect(changed[0]).toContain('"name":"two"');
+  });
+
+  test("keeps a null bodyType", () => {
+    const none = { body: {}, bodyType: null };
+    expect(parseVariants(writeVariants("", { none }))).toEqual({ none });
+  });
+
+  test("rejects duplicate names, unnamed lines and unknown versions", () => {
+    const line = '{"name":"x","bodyType":null,"body":{}}';
+    expect(() => parseVariants(block(`{"version":2}\n${line}\n${line}`))).toThrow(/twice/);
+    expect(() => parseVariants(block('{"version":2}\n{"bodyType":null,"body":{}}'))).toThrow(
+      /no variant name/,
+    );
+    expect(() => parseVariants(block('{"version":3}'))).toThrow(/version 3/);
+  });
+
+  test("still reads the v1 pretty-printed format", () => {
+    const v1 = block(
+      JSON.stringify({ version: 1, variants: { minimal: a, full: b } }, null, 2),
+    );
+    expect(parseVariants(v1)).toEqual({ minimal: a, full: b });
+  });
+
+  test("rewrites a v1 block as v2 on the next save, keeping its variants", async () => {
+    const v1 = "Docs\n\n" + block(JSON.stringify({ version: 1, variants: { minimal: a } }, null, 2));
+    const { ctx, current } = fakeCtx({ description: v1 });
+    await saveVariant(ctx, current(), "full", b);
+    expect(current().description).toBe(
+      "Docs\n\n" +
+        block(
+          [
+            '{"version":2}',
+            '{"name":"full","bodyType":"text/plain","body":{"text":"b"}}',
+            '{"name":"minimal","bodyType":"text/plain","body":{"text":"a"}}',
+          ].join("\n"),
+        ) +
+        "\n",
+    );
+  });
+});
+
 describe("request-level operations", () => {
   test("saves into the request description, not the local store", async () => {
     const { ctx, stored, current } = fakeCtx({ description: "Docs" });

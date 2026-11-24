@@ -23,7 +23,15 @@ export type VariantsByName = Record<string, BodySnapshot>;
  * type changes or a form editor saves, which would silently drop extra keys.
  */
 export const BLOCK_TAG = "yaak-body-swap";
-const FORMAT_VERSION = 1;
+/**
+ * v2 (written): a header line, then one JSON line per variant, sorted by name.
+ *   {"version":2}
+ *   {"name":"minimal","bodyType":"application/json","body":{"text":"..."}}
+ * Compact in the Description tab, and a Git diff names exactly which variant
+ * changed. v1 (read-only): one pretty-printed {"version":1,"variants":{...}}
+ * object; it is rewritten as v2 on the next save or delete.
+ */
+const FORMAT_VERSION = 2;
 
 // Opening fence (3+ backticks) + tag, content, then the same fence on its own line.
 const BLOCK_RE = new RegExp(
@@ -44,33 +52,70 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function parseJson(text: string, where: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new CorruptVariantsError(`${where}: ${err instanceof Error ? err.message : "invalid JSON"}`);
+  }
+}
+
+function toSnapshot(name: string, raw: unknown): BodySnapshot {
+  if (!isRecord(raw) || !isRecord(raw.body)) {
+    throw new CorruptVariantsError(`variant "${name}" has no body object`);
+  }
+  const bodyType = raw.bodyType;
+  if (bodyType !== null && bodyType !== undefined && typeof bodyType !== "string") {
+    throw new CorruptVariantsError(`variant "${name}" has an invalid bodyType`);
+  }
+  return { body: raw.body, bodyType: bodyType ?? null };
+}
+
+function parseV1(parsed: Record<string, unknown>): VariantsByName {
+  if (!isRecord(parsed.variants)) throw new CorruptVariantsError('missing "variants" object');
+  const variants: VariantsByName = {};
+  for (const [name, raw] of Object.entries(parsed.variants)) variants[name] = toSnapshot(name, raw);
+  return variants;
+}
+
+function parseV2(lines: string[]): VariantsByName {
+  const variants: VariantsByName = {};
+  lines.forEach((line, i) => {
+    const entry = parseJson(line, `line ${i + 2}`);
+    if (!isRecord(entry) || typeof entry.name !== "string" || entry.name === "") {
+      throw new CorruptVariantsError(`line ${i + 2} has no variant name`);
+    }
+    if (entry.name in variants) {
+      throw new CorruptVariantsError(`variant "${entry.name}" appears twice`);
+    }
+    variants[entry.name] = toSnapshot(entry.name, entry);
+  });
+  return variants;
+}
+
 /** Extracts the variants stored in a description. Throws CorruptVariantsError on a broken block. */
 export function parseVariants(description: string | null | undefined): VariantsByName {
   const match = BLOCK_RE.exec(description ?? "");
   if (match == null) return {};
+  const content = (match[3] ?? "").trim();
 
-  let parsed: unknown;
+  // v1 is a single (multi-line) JSON document; v2 is one JSON value per line.
+  let whole: unknown;
   try {
-    parsed = JSON.parse(match[3] ?? "");
-  } catch (err) {
-    throw new CorruptVariantsError(err instanceof Error ? err.message : "invalid JSON");
+    whole = JSON.parse(content);
+  } catch {
+    whole = undefined;
   }
-  if (!isRecord(parsed) || !isRecord(parsed.variants)) {
-    throw new CorruptVariantsError('missing "variants" object');
-  }
+  if (isRecord(whole) && whole.version === 1) return parseV1(whole);
 
-  const variants: VariantsByName = {};
-  for (const [name, snapshot] of Object.entries(parsed.variants)) {
-    if (!isRecord(snapshot) || !isRecord(snapshot.body)) {
-      throw new CorruptVariantsError(`variant "${name}" has no body object`);
-    }
-    const bodyType = snapshot.bodyType;
-    if (bodyType !== null && bodyType !== undefined && typeof bodyType !== "string") {
-      throw new CorruptVariantsError(`variant "${name}" has an invalid bodyType`);
-    }
-    variants[name] = { body: snapshot.body, bodyType: bodyType ?? null };
+  const lines = content.split(/\r?\n/).filter((line) => line.trim() !== "");
+  const header = parseJson(lines[0] ?? "", "header line");
+  if (!isRecord(header) || header.version !== FORMAT_VERSION) {
+    throw new CorruptVariantsError(
+      `unsupported format version ${JSON.stringify(isRecord(header) ? header.version : header)}`,
+    );
   }
-  return variants;
+  return parseV2(lines.slice(1));
 }
 
 // Sorted keys at every level: saving the same content twice yields the same
@@ -88,7 +133,15 @@ function sortKeys(value: unknown): unknown {
 }
 
 function renderBlock(variants: VariantsByName): string {
-  const json = JSON.stringify(sortKeys({ version: FORMAT_VERSION, variants }), null, 2);
+  // Fixed field order per line (name first, so the line reads well), body
+  // keys sorted, lines sorted by name: same content always yields same text.
+  const lines = Object.keys(variants)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .map((name) => {
+      const { body, bodyType } = variants[name] as BodySnapshot;
+      return JSON.stringify({ name, bodyType, body: sortKeys(body) });
+    });
+  const json = [JSON.stringify({ version: FORMAT_VERSION }), ...lines].join("\n");
   // The fence must be longer than any backtick run inside the content.
   const longestRun = Math.max(0, ...(json.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(Math.max(3, longestRun + 1));
